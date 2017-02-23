@@ -301,7 +301,16 @@ namespace Microsoft.AspNetCore.Sockets
 
             // Get the bytes for the connection id
             var connectionIdBuffer = Encoding.UTF8.GetBytes(state.Connection.ConnectionId);
-
+            
+            //Convert QueryString parameters into metadata
+            foreach (var query in context.Request.Query)
+            {
+                if (state.Connection.Metadata[query.Key] == null)
+                {
+                    state.Connection.Metadata[query.Key] = query.Value.Count == 1 ? query.Value[0] : query.Value.ToString();
+                }
+            }
+            
             // Write it out to the response with the right content length
             context.Response.ContentLength = connectionIdBuffer.Length;
             return context.Response.Body.WriteAsync(connectionIdBuffer, 0, connectionIdBuffer.Length);
