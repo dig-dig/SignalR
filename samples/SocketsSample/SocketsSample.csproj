@@ -3,7 +3,7 @@
   <Import Project="..\..\build\dependencies.props" />
 
   <PropertyGroup>
-    <TargetFrameworks>netcoreapp1.1;net46</TargetFrameworks>
+    <TargetFrameworks>netcoreapp1.1</TargetFrameworks>
     <PackageTargetFallback Condition=" '$(TargetFramework)' == 'netcoreapp1.1' ">$(PackageTargetFallback);portable-net45+win8+wp8+wpa81</PackageTargetFallback>
     <!-- Don't create a NuGet package -->
     <IsPackable>false</IsPackable>
@@ -20,8 +20,7 @@
   </ItemGroup>
 
   <Target Name="CopyTSClient" BeforeTargets="AfterBuild">
-    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\dist\browser\signalr-client.js"
-          DestinationFolder="$(MSBuildThisFileDirectory)wwwroot\lib\signalr-client" />
+    <Copy SourceFiles="$(MSBuildThisFileDirectory)..\..\dist\browser\signalr-client.js" DestinationFolder="$(MSBuildThisFileDirectory)wwwroot\lib\signalr-client" />
   </Target>
 
 </Project>
