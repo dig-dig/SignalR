@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using System.Collections.Generic;
 using Microsoft.AspNetCore.Sockets.Client.Internal;
 using Microsoft.Extensions.Logging;
+using System.Linq;
 
 namespace Microsoft.AspNetCore.Sockets.Client
 {
@@ -160,6 +161,9 @@ namespace Microsoft.AspNetCore.Sockets.Client
                 uriBuilder.Scheme = "wss";
             }
 
+            //remove all params
+            var id = uriBuilder.Query.TrimStart('?').Split( '&').ToDictionary(x => x.Split('=')[0], x => x.Split('=')[1]).FirstOrDefault(a => a.Key.Equals("id", StringComparison.OrdinalIgnoreCase));
+            uriBuilder.Query = $"?{id.Key}={id.Value}";
             uriBuilder.Path += "/ws";
 
             await _webSocket.ConnectAsync(uriBuilder.Uri, _cancellationToken);
