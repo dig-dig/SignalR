@@ -207,7 +207,8 @@ namespace Microsoft.AspNetCore.SignalR.Client
 
             // TODO: Return values
             // TODO: Dispatch to a sync context to ensure we aren't blocking this loop.
-            handler.Handler(invocationDescriptor.Arguments);
+            if (handler.Handler != null)
+                handler.Handler(invocationDescriptor.Arguments);
         }
 
         private void DispatchInvocationResult(InvocationResultDescriptor result, InvocationRequest irq, CancellationToken cancellationToken)
