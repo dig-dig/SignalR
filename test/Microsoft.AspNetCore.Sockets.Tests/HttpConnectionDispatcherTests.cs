@@ -10,6 +10,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Internal;
 using Microsoft.AspNetCore.SignalR.Tests.Common;
 using Microsoft.AspNetCore.Sockets.Internal;
+using Microsoft.AspNetCore.WebSockets.Internal;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Primitives;
@@ -31,6 +32,7 @@ namespace Microsoft.AspNetCore.Sockets.Tests
             var context = new DefaultHttpContext();
             var services = new ServiceCollection();
             services.AddEndPoint<TestEndPoint>();
+            services.AddOptions();
             context.RequestServices = services.BuildServiceProvider();
             var ms = new MemoryStream();
             context.Request.Path = "/negotiate";
@@ -61,6 +63,7 @@ namespace Microsoft.AspNetCore.Sockets.Tests
 
                 var services = new ServiceCollection();
                 services.AddEndPoint<TestEndPoint>();
+                services.AddOptions();
                 context.RequestServices = services.BuildServiceProvider();
                 context.Request.Path = path;
                 var values = new Dictionary<string, StringValues>();
@@ -89,6 +92,7 @@ namespace Microsoft.AspNetCore.Sockets.Tests
                 var context = new DefaultHttpContext();
                 context.Response.Body = strm;
                 var services = new ServiceCollection();
+                services.AddOptions();
                 services.AddEndPoint<TestEndPoint>();
                 context.RequestServices = services.BuildServiceProvider();
                 context.Request.Path = path;
@@ -99,6 +103,40 @@ namespace Microsoft.AspNetCore.Sockets.Tests
                 await strm.FlushAsync();
                 Assert.Equal("Connection ID required", Encoding.UTF8.GetString(strm.ToArray()));
             }
+        }
+
+        [Theory]
+        [InlineData(TransportType.LongPolling, 204)]
+        [InlineData(TransportType.WebSockets, 404)]
+        [InlineData(TransportType.ServerSentEvents, 404)]
+        public async Task EndPointThatOnlySupportsLongPollingRejectsOtherTransports(TransportType transportType, int status)
+        {
+            await CheckTransportSupported(TransportType.LongPolling, transportType, status);
+        }
+
+        [Theory]
+        [InlineData(TransportType.ServerSentEvents, 200)]
+        [InlineData(TransportType.WebSockets, 404)]
+        [InlineData(TransportType.LongPolling, 404)]
+        public async Task EndPointThatOnlySupportsSSERejectsOtherTransports(TransportType transportType, int status)
+        {
+            await CheckTransportSupported(TransportType.ServerSentEvents, transportType, status);
+        }
+
+        [Theory]
+        [InlineData(TransportType.WebSockets, 200)]
+        [InlineData(TransportType.ServerSentEvents, 404)]
+        [InlineData(TransportType.LongPolling, 404)]
+        public async Task EndPointThatOnlySupportsWebSockesRejectsOtherTransports(TransportType transportType, int status)
+        {
+            await CheckTransportSupported(TransportType.WebSockets, transportType, status);
+        }
+
+        [Theory]
+        [InlineData(TransportType.LongPolling, 404)]
+        public async Task EndPointThatOnlySupportsWebSocketsAndSSERejectsLongPolling(TransportType transportType, int status)
+        {
+            await CheckTransportSupported(TransportType.WebSockets | TransportType.ServerSentEvents, transportType, status);
         }
 
         [Fact]
@@ -177,16 +215,18 @@ namespace Microsoft.AspNetCore.Sockets.Tests
             Assert.False(exists);
         }
 
-        [Fact]
-        public async Task RequestToActiveConnectionId409ForStreamingTransports()
+        [Theory]
+        [InlineData("/ws", true)]
+        [InlineData("/sse", false)]
+        public async Task RequestToActiveConnectionId409ForStreamingTransports(string path, bool isWebSocketRequest)
         {
             var manager = CreateConnectionManager();
             var state = manager.CreateConnection();
 
             var dispatcher = new HttpConnectionDispatcher(manager, new LoggerFactory());
 
-            var context1 = MakeRequest<TestEndPoint>("/sse", state);
-            var context2 = MakeRequest<TestEndPoint>("/sse", state);
+            var context1 = MakeRequest<TestEndPoint>(path, state, isWebSocketRequest: isWebSocketRequest);
+            var context2 = MakeRequest<TestEndPoint>(path, state, isWebSocketRequest: isWebSocketRequest);
 
             var request1 = dispatcher.ExecuteAsync<TestEndPoint>("", context1);
 
@@ -318,6 +358,34 @@ namespace Microsoft.AspNetCore.Sockets.Tests
             Assert.False(exists);
         }
 
+        [Fact]
+        public async Task AttemptingToPollWhileAlreadyPollingReplacesTheCurrentPoll()
+        {
+            var manager = CreateConnectionManager();
+            var state = manager.CreateConnection();
+
+            var dispatcher = new HttpConnectionDispatcher(manager, new LoggerFactory());
+
+            var context1 = MakeRequest<BlockingEndPoint>("/poll", state);
+            var task1 = dispatcher.ExecuteAsync<BlockingEndPoint>("", context1);
+            var context2 = MakeRequest<BlockingEndPoint>("/poll", state);
+            var task2 = dispatcher.ExecuteAsync<BlockingEndPoint>("", context2);
+
+            // Task 1 should finish when request 2 arrives
+            await task1.OrTimeout();
+
+            // Send a message from the app to complete Task 2
+            await state.Connection.Transport.Output.WriteAsync(new Message(Encoding.UTF8.GetBytes("Hello, World"), MessageType.Text));
+
+            await task2.OrTimeout();
+
+            // Verify the results
+            Assert.Equal(StatusCodes.Status204NoContent, context1.Response.StatusCode);
+            Assert.Equal(string.Empty, GetContentAsString(context1.Response.Body));
+            Assert.Equal(StatusCodes.Status200OK, context2.Response.StatusCode);
+            Assert.Equal("T12:T:Hello, World;", GetContentAsString(context2.Response.Body));
+        }
+
         [Theory]
         [InlineData("", "text", "Hello, World", "Hello, World", MessageType.Text)] // Legacy format
         [InlineData("", "binary", "Hello, World", "Hello, World", MessageType.Binary)] // Legacy format
@@ -356,6 +424,56 @@ namespace Microsoft.AspNetCore.Sockets.Tests
             Assert.Equal(MessageType.Close, messages[3].Type);
         }
 
+        private static async Task CheckTransportSupported(TransportType supportedTransports, TransportType transportType, int status)
+        {
+            var path = "";
+            switch (transportType)
+            {
+                case TransportType.WebSockets:
+                    path = "/ws";
+                    break;
+                case TransportType.ServerSentEvents:
+                    path = "/sse";
+                    break;
+                case TransportType.LongPolling:
+                    path = "/poll";
+                    break;
+                default:
+                    break;
+            }
+
+            var manager = CreateConnectionManager();
+            var state = manager.CreateConnection();
+            var dispatcher = new HttpConnectionDispatcher(manager, new LoggerFactory());
+            using (var strm = new MemoryStream())
+            {
+                var context = new DefaultHttpContext();
+                context.Response.Body = strm;
+                var services = new ServiceCollection();
+                services.AddOptions();
+                services.AddEndPoint<ImmediatelyCompleteEndPoint>(options =>
+                {
+                    options.Transports = supportedTransports;
+                });
+
+                context.RequestServices = services.BuildServiceProvider();
+                context.Request.Path = path;
+                var values = new Dictionary<string, StringValues>();
+                values["id"] = state.Connection.ConnectionId;
+                var qs = new QueryCollection(values);
+                context.Request.Query = qs;
+                await dispatcher.ExecuteAsync<ImmediatelyCompleteEndPoint>("", context);
+                Assert.Equal(status, context.Response.StatusCode);
+                await strm.FlushAsync();
+
+                // Check the message for 404
+                if (status == 404)
+                {
+                    Assert.Equal($"{transportType} transport not supported by this end point type", Encoding.UTF8.GetString(strm.ToArray()));
+                }
+            }
+        }
+
         private static async Task<List<Message>> RunSendTest(string contentType, string encoded, string format)
         {
             var manager = CreateConnectionManager();
@@ -384,11 +502,12 @@ namespace Microsoft.AspNetCore.Sockets.Tests
             return messages;
         }
 
-        private static DefaultHttpContext MakeRequest<TEndPoint>(string path, ConnectionState state, string format = null) where TEndPoint : EndPoint
+        private static DefaultHttpContext MakeRequest<TEndPoint>(string path, ConnectionState state, string format = null, bool isWebSocketRequest = false) where TEndPoint : EndPoint
         {
             var context = new DefaultHttpContext();
             var services = new ServiceCollection();
             services.AddEndPoint<TEndPoint>();
+            services.AddOptions();
             context.RequestServices = services.BuildServiceProvider();
             context.Request.Path = path;
             var values = new Dictionary<string, StringValues>();
@@ -399,12 +518,30 @@ namespace Microsoft.AspNetCore.Sockets.Tests
             }
             var qs = new QueryCollection(values);
             context.Request.Query = qs;
+            context.Response.Body = new MemoryStream();
+
+            if (isWebSocketRequest)
+            {
+                // Add Test WebSocket feature
+                context.Features.Set<IHttpWebSocketConnectionFeature>(new TestWebSocketConnectionFeature());
+            }
+
             return context;
         }
 
         private static ConnectionManager CreateConnectionManager()
         {
             return new ConnectionManager(new Logger<ConnectionManager>(new LoggerFactory()));
+        }
+
+        private string GetContentAsString(Stream body)
+        {
+            Assert.True(body.CanSeek, "Can't get content of a non-seekable stream");
+            body.Seek(0, SeekOrigin.Begin);
+            using (var reader = new StreamReader(body))
+            {
+                return reader.ReadToEnd();
+            }
         }
     }
 

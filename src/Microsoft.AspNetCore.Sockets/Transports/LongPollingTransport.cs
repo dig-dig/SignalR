@@ -17,7 +17,6 @@ namespace Microsoft.AspNetCore.Sockets.Transports
 {
     public class LongPollingTransport : IHttpTransport
     {
-        public static readonly string Name = "longPolling";
         private readonly ReadableChannel<Message> _application;
         private readonly ILogger _logger;
 
@@ -49,6 +48,8 @@ namespace Microsoft.AspNetCore.Sockets.Transports
 
                 output.Append(MessageFormatter.GetFormatIndicator(messageFormat));
 
+                // We're intentionally not checking cancellation here because we need to drain messages we've got so far,
+                // but it's too late to emit the 204 required by being cancelled.
                 while (_application.TryRead(out var message))
                 {
                     _logger.LogDebug("Writing {0} byte message to response", message.Payload.Length);
