@@ -2,16 +2,21 @@
 // Licensed under the Apache License, Version 2.0. See License.txt in the project root for license information.
 
 using System;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Text;
+using System.Text.Formatting;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Client.Tests;
+using Microsoft.AspNetCore.SignalR.Tests.Common;
+using Microsoft.AspNetCore.Sockets.Internal.Formatters;
+using Microsoft.AspNetCore.Sockets.Tests.Internal;
 using Microsoft.Extensions.Logging;
 using Moq;
 using Moq.Protected;
 using Xunit;
-using Microsoft.AspNetCore.SignalR.Tests.Common;
 
 namespace Microsoft.AspNetCore.Sockets.Client.Tests
 {
@@ -261,7 +266,7 @@ namespace Microsoft.AspNetCore.Sockets.Client.Tests
                 .Returns<HttpRequestMessage, CancellationToken>(async (request, cancellationToken) =>
                 {
                     await Task.Yield();
-                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(string.Empty) };
+                    return ResponseUtils.CreateResponse(HttpStatusCode.OK);
                 });
 
             using (var httpClient = new HttpClient(mockHttpHandler.Object))
@@ -434,7 +439,7 @@ namespace Microsoft.AspNetCore.Sockets.Client.Tests
                 .Returns<HttpRequestMessage, CancellationToken>(async (request, cancellationToken) =>
                 {
                     await Task.Yield();
-                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(string.Empty) };
+                    return ResponseUtils.CreateResponse(HttpStatusCode.OK);
                 });
 
             using (var httpClient = new HttpClient(mockHttpHandler.Object))
@@ -460,6 +465,10 @@ namespace Microsoft.AspNetCore.Sockets.Client.Tests
         [Fact]
         public async Task CanSendData()
         {
+            var data = new byte[] { 1, 1, 2, 3, 5, 8 };
+            var message = new Message(data, MessageType.Binary);
+            var expectedPayload = FormatMessageToArray(message, MessageFormat.Binary);
+
             var sendTcs = new TaskCompletionSource<byte[]>();
             var mockHttpHandler = new Mock<HttpMessageHandler>();
             mockHttpHandler.Protected()
@@ -471,22 +480,20 @@ namespace Microsoft.AspNetCore.Sockets.Client.Tests
                     {
                         sendTcs.SetResult(await request.Content.ReadAsByteArrayAsync());
                     }
-                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(string.Empty) };
+                    return ResponseUtils.CreateResponse(HttpStatusCode.OK);
                 });
 
             using (var httpClient = new HttpClient(mockHttpHandler.Object))
             {
-
                 var longPollingTransport = new LongPollingTransport(httpClient, new LoggerFactory());
                 var connection = new Connection(new Uri("http://fakeuri.org/"));
                 try
                 {
                     await connection.StartAsync(longPollingTransport, httpClient);
 
-                    var data = new byte[] { 1, 1, 2, 3, 5, 8 };
                     await connection.SendAsync(data, MessageType.Binary);
 
-                    Assert.Equal(data, await sendTcs.Task.OrTimeout());
+                    Assert.Equal(expectedPayload, await sendTcs.Task.OrTimeout());
                 }
                 finally
                 {
@@ -549,9 +556,9 @@ namespace Microsoft.AspNetCore.Sockets.Client.Tests
                     await Task.Yield();
                     if (request.RequestUri.AbsolutePath.EndsWith("/send"))
                     {
-                        return new HttpResponseMessage(HttpStatusCode.InternalServerError) { Content = new StringContent(string.Empty) };
+                        return ResponseUtils.CreateResponse(HttpStatusCode.InternalServerError);
                     }
-                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(string.Empty) };
+                    return ResponseUtils.CreateResponse(HttpStatusCode.OK);
                 });
 
             using (var httpClient = new HttpClient(mockHttpHandler.Object))
@@ -583,7 +590,7 @@ namespace Microsoft.AspNetCore.Sockets.Client.Tests
                     {
                         content = "T2:T:42;";
                     }
-                    return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(content) };
+                    return ResponseUtils.CreateResponse(HttpStatusCode.OK, MessageFormatter.TextContentType, content);
                 });
 
             using (var httpClient = new HttpClient(mockHttpHandler.Object))
@@ -658,6 +665,14 @@ namespace Microsoft.AspNetCore.Sockets.Client.Tests
                     await connection.DisposeAsync();
                 }
             }
+        }
+
+        private byte[] FormatMessageToArray(Message message, MessageFormat binary, int bufferSize = 1024)
+        {
+            var output = new ArrayOutput(bufferSize);
+            output.Append('B', TextEncoder.Utf8);
+            Assert.True(MessageFormatter.TryWriteMessage(message, output, binary));
+            return output.ToArray();
         }
     }
 }

@@ -12,6 +12,8 @@
 
   <ItemGroup>
     <Compile Include="..\Common\TaskExtensions.cs" Link="TaskExtensions.cs" />
+    <Compile Include="..\Common\ArrayOutput.cs" Link="ArrayOutput.cs" />
+    <Compile Include="..\Common\XUnitLoggerProvider.cs" Link="XUnitLoggerProvider.cs" />
   </ItemGroup>
 
   <ItemGroup>
@@ -19,7 +21,7 @@
     <ProjectReference Include="..\..\src\Microsoft.AspNetCore.Sockets.Client\Microsoft.AspNetCore.Sockets.Client.csproj" />
     <PackageReference Include="Microsoft.Extensions.Logging" Version="$(AspNetCoreVersion)" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="$(TestSdkVersion)" />
-    <PackageReference Include="Moq" Version="4.7.0" />
+    <PackageReference Include="Moq" Version="$(MoqVersion)" />
     <PackageReference Include="xunit.runner.visualstudio" Version="$(XunitVersion)" />
     <PackageReference Include="xunit" Version="$(XunitVersion)" />
   </ItemGroup>

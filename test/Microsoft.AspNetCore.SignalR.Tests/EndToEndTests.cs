@@ -16,6 +16,7 @@ using Xunit;
 
 using ClientConnection = Microsoft.AspNetCore.Sockets.Client.Connection;
 using Microsoft.AspNetCore.SignalR.Tests.Common;
+using Xunit.Abstractions;
 
 namespace Microsoft.AspNetCore.SignalR.Tests
 {
@@ -28,11 +29,19 @@ namespace Microsoft.AspNetCore.SignalR.Tests
     [Collection(EndToEndTestsCollection.Name)]
     public class EndToEndTests
     {
+        private readonly ITestOutputHelper _output;
+
         private readonly ServerFixture _serverFixture;
 
-        public EndToEndTests(ServerFixture serverFixture)
+        public EndToEndTests(ServerFixture serverFixture, ITestOutputHelper output)
         {
+            if (serverFixture == null)
+            {
+                throw new ArgumentNullException(nameof(serverFixture));
+            }
+
             _serverFixture = serverFixture;
+            _output = output;
         }
 
         [ConditionalFact]
@@ -58,19 +67,22 @@ namespace Microsoft.AspNetCore.SignalR.Tests
         {
             get
             {
-                yield return new object[] { new WebSocketsTransport() };
-                yield return new object[] { new LongPollingTransport(new HttpClient()) };
+                yield return new object[] { new Func<ILoggerFactory, ITransport>(loggerFactory => new WebSocketsTransport(loggerFactory)) };
+                yield return new object[] { new Func<ILoggerFactory, ITransport>(loggerFactory => new LongPollingTransport(new HttpClient(), loggerFactory)) };
             }
         }
 
         [ConditionalTheory]
         [OSSkipCondition(OperatingSystems.Windows, WindowsVersions.Win7, WindowsVersions.Win2008R2, SkipReason = "No WebSockets Client for this platform")]
         [MemberData(nameof(Transports))]
-        public async Task ConnectionCanSendAndReceiveMessages(ITransport transport)
+        public async Task ConnectionCanSendAndReceiveMessages(Func<ILoggerFactory, ITransport> transportFactory)
         {
             const string message = "Major Key";
             var baseUrl = _serverFixture.BaseUrl;
             var loggerFactory = new LoggerFactory();
+            loggerFactory.AddXUnit(_output, LogLevel.Trace);
+
+            var transport = transportFactory(loggerFactory);
 
             using (var httpClient = new HttpClient())
             {
@@ -110,8 +122,8 @@ namespace Microsoft.AspNetCore.SignalR.Tests
         {
             get
             {
-                yield return new object[] { new string('A', 5 * 1024)};
-                yield return new object[] { new string('A', 5 * 1024 * 1024 + 32)};
+                yield return new object[] { new string('A', 5 * 1024) };
+                yield return new object[] { new string('A', 5 * 1024 * 1024 + 32) };
             }
         }
 
@@ -122,6 +134,7 @@ namespace Microsoft.AspNetCore.SignalR.Tests
         {
             var baseUrl = _serverFixture.BaseUrl;
             var loggerFactory = new LoggerFactory();
+            loggerFactory.AddXUnit(_output, LogLevel.Debug);
 
             var connection = new ClientConnection(new Uri(baseUrl + "/echo"), loggerFactory);
             try

@@ -9,6 +9,7 @@ using System.Threading.Tasks.Channels;
 using Microsoft.AspNetCore.Sockets.Client.Internal;
 using Microsoft.AspNetCore.Sockets.Internal;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Microsoft.AspNetCore.Sockets.Client
 {
@@ -21,7 +22,7 @@ namespace Microsoft.AspNetCore.Sockets.Client
         private volatile IChannelConnection<Message, SendMessage> _transportChannel;
         private volatile ITransport _transport;
         private volatile Task _receiveLoopTask;
-        private volatile Task _startTask = Task.CompletedTask;
+        private TaskCompletionSource<object> _startTcs = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
         private TaskQueue _eventQueue = new TaskQueue();
 
         private ReadableChannel<Message> Input => _transportChannel.Input;
@@ -51,17 +52,36 @@ namespace Microsoft.AspNetCore.Sockets.Client
 
         public Task StartAsync(ITransport transport, HttpClient httpClient)
         {
-            _startTask = StartAsyncInternal(transport, httpClient);
-            return _startTask;
+            if (Interlocked.CompareExchange(ref _connectionState, ConnectionState.Connecting, ConnectionState.Initial)
+                != ConnectionState.Initial)
+            {
+                return Task.FromException(
+                    new InvalidOperationException("Cannot start a connection that is not in the Initial state."));
+            }
+
+            StartAsyncInternal(transport, httpClient)
+                .ContinueWith(t =>
+                {
+                    if (t.IsFaulted)
+                    {
+                        _startTcs.SetException(t.Exception.InnerException);
+                    }
+                    else if (t.IsCanceled)
+                    {
+                        _startTcs.SetCanceled();
+                    }
+                    else
+                    {
+                        _startTcs.SetResult(null);
+                    }
+                });
+
+            return _startTcs.Task;
         }
 
         private async Task StartAsyncInternal(ITransport transport, HttpClient httpClient)
         {
-            if (Interlocked.CompareExchange(ref _connectionState, ConnectionState.Connecting, ConnectionState.Initial)
-                != ConnectionState.Initial)
-            {
-                throw new InvalidOperationException("Cannot start a connection that is not in the Initial state.");
-            }
+            _logger.LogDebug("Starting connection.");
 
             try
             {
@@ -70,10 +90,13 @@ namespace Microsoft.AspNetCore.Sockets.Client
                 // Connection is being stopped while start was in progress
                 if (_connectionState == ConnectionState.Disconnected)
                 {
+                    _logger.LogDebug("Connection was closed from a different thread.");
                     return;
                 }
 
                 _transport = transport ?? new WebSocketsTransport(_loggerFactory);
+
+                _logger.LogDebug("Starting transport '{0}' with Url: {1}", transport.GetType().Name, connectUrl);
                 await StartTransport(connectUrl);
             }
             catch
@@ -88,6 +111,8 @@ namespace Microsoft.AspNetCore.Sockets.Client
             {
                 var ignore = _eventQueue.Enqueue(() =>
                 {
+                    _logger.LogDebug("Raising Connected event");
+
                     // Do not "simplify" - events can be removed from a different thread
                     var connectedEventHandler = Connected;
                     if (connectedEventHandler != null)
@@ -102,7 +127,20 @@ namespace Microsoft.AspNetCore.Sockets.Client
                 {
                     Interlocked.Exchange(ref _connectionState, ConnectionState.Disconnected);
 
+                    // There is an inherent race between receive and close. Removing the last message from the channel
+                    // makes Input.Completion task completed and runs this continuation. We need to await _receiveLoopTask
+                    // to make sure that the message removed from the channel is processed before we drain the queue.
+                    // There is a short window between we start the channel and assign the _receiveLoopTask a value.
+                    // To make sure that _receiveLoopTask can be awaited (i.e. is not null) we need to await _startTask.
+                    _logger.LogDebug("Ensuring all outstanding messages are processed.");
+
+                    await _startTcs.Task;
+                    await _receiveLoopTask;
+
+                    _logger.LogDebug("Draining event queue");
                     await _eventQueue.Drain();
+
+                    _logger.LogDebug("Raising Closed event");
 
                     // Do not "simplify" - event handlers can be removed from a different thread
                     var closedEventHandler = Closed;
@@ -195,8 +233,10 @@ namespace Microsoft.AspNetCore.Sockets.Client
                     if (Input.TryRead(out Message message))
                     {
                         _logger.LogDebug("Scheduling raising Received event.");
-                        var ignore = _eventQueue.Enqueue(() => 
+                        var ignore = _eventQueue.Enqueue(() =>
                         {
+                            _logger.LogDebug("Raising Received event.");
+
                             // Do not "simplify" - event handlers can be removed from a different thread
                             var receivedEventHandler = Received;
                             if (receivedEventHandler != null)
@@ -249,6 +289,8 @@ namespace Microsoft.AspNetCore.Sockets.Client
             var sendTcs = new TaskCompletionSource<object>(TaskCreationOptions.RunContinuationsAsynchronously);
             var message = new SendMessage(data, type, sendTcs);
 
+            _logger.LogDebug("Sending message");
+
             while (await Output.WaitToWriteAsync(cancellationToken))
             {
                 if (Output.TryWrite(message))
@@ -263,10 +305,15 @@ namespace Microsoft.AspNetCore.Sockets.Client
         {
             _logger.LogInformation("Stopping client.");
 
-            Interlocked.Exchange(ref _connectionState, ConnectionState.Disconnected);
+            if (Interlocked.Exchange(ref _connectionState, ConnectionState.Disconnected) == ConnectionState.Initial)
+            {
+                // the connection was never started so there is nothing to clean up
+                return;
+            }
+
             try
             {
-                await _startTask;
+                await _startTcs.Task;
             }
             catch
             {
